@@ -14,27 +14,10 @@ logging.set_verbosity_error()
 ###########################
 # Configuration
 ###########################
-if len(sys.argv) < 2 or sys.argv[1] not in ['qwen', 'mistral', 'gemma']:
-    print("Usage: python script_name.py <qwen|mistral|gemma>")
-    sys.exit(1)
+MODEL_A = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_B = "Qwen/Qwen2.5-7B-Instruct"
 
-# Model Selection
-if sys.argv[1] == 'qwen':
-    MODEL_A = "Qwen/Qwen2.5-1.5B-Instruct"
-    MODEL_B = "Qwen/Qwen2.5-7B-Instruct"
-elif sys.argv[1] == 'mistral':
-    MODEL_A = "mistralai/Mistral-7B-Instruct-v0.2"
-    MODEL_B = "mistralai/Mistral-7B-Instruct-v0.3"
-else:
-    MODEL_A = "google/gemma-2-9b"
-    MODEL_B = "google/gemma-2-9b-it"
-
-if "Qwen" in MODEL_A:
-    NUM_LAYERS = 28
-elif "Mistral" in MODEL_A:
-    NUM_LAYERS = 32
-else:
-    NUM_LAYERS = 42
+NUM_LAYERS = 28
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_PATH = "kv_translators_musique.pth"
@@ -43,7 +26,7 @@ TEMP_DATA_DIR = "kv_cache_chunks" # Directory to save intermediate files
 # Configuration for Musique Multi-hop task
 NUM_PROMPTS = 5000 
 MAX_CTX_TOKENS = 512 # Context window for multi-hop
-TRAIN_STEPS = 100
+TRAIN_STEPS = 3000
 DATA_GEN_BATCH_SIZE = 8 # Batch size for sequential generation
 DATA_CHUNK_SIZE = 500 # Number of prompts per chunk to save to disk
 TRAINING_BATCH_SIZE = 32 # Mini-batch size for GPU training
@@ -138,8 +121,9 @@ def main():
             # Generate prompts
             prompts = []
             for d in batch_data:
-                context_text = " ".join([p["paragraph_text"] for p in d["paragraphs"]])
-                first_hop_prompt = f"{context_text} {d['question_decomposition'][0]}"
+                context_text = "\n".join([p["paragraph_text"] for p in d["paragraphs"] if p['is_supporting'] == True])
+                context_text += "\n".join([p["paragraph_text"] for p in d["paragraphs"] if p['is_supporting'] == False][:3])
+                first_hop_prompt = f"{d['question_decomposition'][0]['question']}"
                 prompts.append(first_hop_prompt)
             
             # Generate KV caches

@@ -14,34 +14,12 @@ import gc
 
 logging.set_verbosity_error()
 
-###########################
-# Configuration
-###########################
-# UPDATED: Added 'gemma' option
-if len(sys.argv) < 2 or sys.argv[1] not in ['qwen', 'mistral', 'gemma']:
-    print("Usage: python test_musique.py <qwen|mistral|gemma>")
-    sys.exit(1)
+MODEL_A = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_B = "Qwen/Qwen2.5-7B-Instruct"
 
-if sys.argv[1] == 'qwen':
-    MODEL_A = "Qwen/Qwen2.5-1.5B-Instruct"
-    MODEL_B = "Qwen/Qwen2.5-7B-Instruct"
-elif sys.argv[1] == 'mistral':
-    MODEL_A = "mistralai/Mistral-7B-Instruct-v0.2"
-    MODEL_B = "mistralai/Mistral-7B-Instruct-v0.3"
-else: # gemma
-    MODEL_A = "google/gemma-2-9b"
-    MODEL_B = "google/gemma-2-9b-it"
+LOAD_PATH = "kv_translators_musique.pth"
 
-
-LOAD_PATH = "kv_translators_musique.pth" # Updated path to match training script
-# UPDATED: NUM_LAYERS logic
-if "Qwen" in MODEL_A:
-    NUM_LAYERS = 28
-elif "Mistral" in MODEL_A:
-    NUM_LAYERS = 32
-else:
-    NUM_LAYERS = 42
-
+NUM_LAYERS = 28
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 MAX_CTX_TOKENS = 512
@@ -49,7 +27,6 @@ MAX_NEW_TOKENS = 64
 NUM_TESTS = 50
 MIXED_PRECISION = True
 SEED = 42
-###########################
 
 def normalize_text(s):
     s = s.lower()
@@ -69,6 +46,12 @@ def calculate_f1_score(prediction, ground_truth):
     recall = 1.0 * num_same / len(truth_tokens)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
+
+
+def calculate_exact_match_score(prediction, ground_truth):
+    em = 1 if ground_truth in prediction else 0
+    return em
+
 
 class FastKVTranslator(nn.Module):
     # (FastKVTranslator remains the same)
@@ -153,14 +136,21 @@ def run_test():
     print(f"Loaded {len(dataset)} examples, testing {NUM_TESTS} random samples.")
 
     total_f1_score = 0
+    total_em_score = 0
     for i, example_idx in enumerate(tqdm(test_indices, desc="Running Multi-Hop Evaluation")):
         example = dataset[example_idx]
-        
+        if len(example['question_decomposition']) != 2:
+            continue
         try:
-            # Step 1: First hop on Model A using the context + first question part
-            context_text = " ".join([p["paragraph_text"] for p in example["paragraphs"]])
+            distractor_text = [p["paragraph_text"] for p in example["paragraphs"] if p['is_supporting'] == False]
+            distractor_text = random.sample(distractor_text, 3)
+            paragraph_idx = example['question_decomposition'][0]['paragraph_support_idx']
+            context_text = [example['paragraphs'][paragraph_idx]['paragraph_text']] + distractor_text
+            random.shuffle(context_text)
+            context_text = "\n\n".join(context_text)
+            
             # The prompt includes the context and the first hop of the decomposed question
-            first_hop_prompt = f"{context_text} {example['question_decomposition'][0]}"
+            first_hop_prompt = f"{context_text}\n{example['question_decomposition'][0]['question']}"
             
             # Use generate_kv_cache to get the KV cache from Model A
             sk, sv = generate_kv_cache([first_hop_prompt], tokenizer_a, model_a, DEVICE, MAX_CTX_TOKENS)
@@ -176,16 +166,22 @@ def run_test():
             gc.collect(); torch.cuda.empty_cache()
 
             # Step 3: Prepare the final question for Model B
-            full_question = example['question']
+            paragraph_idx = example['question_decomposition'][1]['paragraph_support_idx']
+            context_text = [example['paragraphs'][paragraph_idx]['paragraph_text']] + distractor_text
+            random.shuffle(context_text)
+
+            model_b_context = "\n\n".join(context_text) 
+            # model_b_context = example['paragraphs'][paragraph_idx]
             
-            # Prepare the final question prompt for Model B (only the instruction/question)
-            # The critical part is to ONLY tokenize the instruction/question text, NOT the full context,
-            # as the context is already represented by the translated_cache.
+            model_b_q = example['question']
+            model_b_question = f"{model_b_q} \n\n {model_b_context}"
+            # model_b_question = f"{example['question_decomposition'][1]['question']} \n\n {model_b_context}"
+            # model_b_question = f"{example['question_decomposition'][1]['question']}"
             
             # Use a simple instruction template for Model B
-            question_only_prompt = f"Answer the following question based on the context provided in your memory (KV cache):\n\nQuestion: {full_question}\n\nAnswer:"
+            second_hop_prompt = f"Answer the following question. Be concise:\n\nQuestion: {model_b_question}\n\nAnswer:"
             
-            q_inputs = tokenizer_b(question_only_prompt, return_tensors="pt").to(DEVICE)
+            q_inputs = tokenizer_b(second_hop_prompt, return_tensors="pt").to(DEVICE)
             
             if q_inputs.input_ids.shape[1] == 0:
                 tqdm.write(f"Skipping example {example['id']} due to empty tokenized question.")
@@ -211,7 +207,6 @@ def run_test():
                     pad_token_id=tokenizer_b.eos_token_id
                 )
 
-            # Step 4: Decode and Evaluate
             # The response starts *after* the prompt we fed to Model B
             response_start_index = q_inputs.input_ids.shape[1]
             full_decoded_response = tokenizer_b.decode(generated[0], skip_special_tokens=True)
@@ -219,21 +214,22 @@ def run_test():
             # Extract only the generated part
             response = tokenizer_b.decode(generated[0, response_start_index:], skip_special_tokens=True).strip()
             
-            # Clean the response (take first sentence/line)
             cleaned_response = response.split('\n')[0].split('.')[0] if '.' in response.split('\n')[0] else response.split('\n')[0]
 
             ground_truth_answer = example['answer'].strip()
             
             f1 = calculate_f1_score(cleaned_response, ground_truth_answer)
             total_f1_score += f1
+            em = calculate_exact_match_score(cleaned_response, ground_truth_answer)
+            total_em_score += em
+            if em or not em:
+                tqdm.write(f"{example['id']}")
+                tqdm.write(f"Model A Decomposed Question: {example['question_decomposition'][0]['question']}")
+                tqdm.write("Model B Question " + model_b_question.split('\n')[0])
+                tqdm.write(f"Model B Output: {cleaned_response}")
+                tqdm.write(f"Ground Truth: {ground_truth_answer}")
+                #tqdm.write(f"F1 Score: {f1:.4f}")
             
-            tqdm.write(f"\nExample ID: {example['id']}")
-            tqdm.write(f"Question: {full_question}")
-            tqdm.write(f"Model A First Hop Input (Initial Context): {first_hop_prompt[:100]}...")
-            # tqdm.write(f"Model B Final Input: {question_only_prompt.split('\n')[0]}...")
-            tqdm.write(f"Model B Output: {cleaned_response}")
-            tqdm.write(f"Ground Truth: {ground_truth_answer}")
-            tqdm.write(f"F1 Score: {f1:.4f}")
             gc.collect(); torch.cuda.empty_cache()
 
         except Exception as e:
@@ -241,8 +237,11 @@ def run_test():
             traceback.print_exc()
 
     average_f1 = total_f1_score / NUM_TESTS
+    average_em = total_em_score / NUM_TESTS
     print(f"\n--- Final Results ---")
     print(f"Average F1 Score across {NUM_TESTS} samples: {average_f1:.4f}")
+    print(f"Average Exact Match Score across {NUM_TESTS} samples: {average_em:.4f}")
+
 
 if __name__ == "__main__":
     run_test()
