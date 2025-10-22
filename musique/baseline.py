@@ -1,4 +1,3 @@
-# (Imports and setup constants remain the same)
 import random
 import torch
 import torch.nn as nn
@@ -18,13 +17,9 @@ logging.set_verbosity_error()
 MODEL_A = "Qwen/Qwen2.5-1.5B-Instruct"
 MODEL_B = "Qwen/Qwen2.5-7B-Instruct"
 
-# LOAD_PATH is not needed for the baseline
-# LOAD_PATH = "kv_translators_musique.pth" 
-
-NUM_LAYERS = 28 # Not strictly needed for baseline, but kept for context
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-MAX_CTX_TOKENS = 512
+MAX_CTX_TOKENS = 2048 # Increased to 2048 to prevent prompt truncation issues
 MAX_NEW_TOKENS = 64
 NUM_TESTS = 50
 MIXED_PRECISION = True
@@ -53,7 +48,7 @@ def calculate_f1_score(prediction, ground_truth):
 
 
 def calculate_exact_match_score(prediction, ground_truth):
-    # Note: Using the original, potentially permissive EM logic for direct comparison
+    # Using the original, potentially permissive EM logic for direct comparison
     em = 1 if ground_truth in prediction else 0 
     return em
 
@@ -76,10 +71,9 @@ def load_models_only():
     return model_a, model_b, tokenizer_a, tokenizer_b
 
 
-# --- Baseline Test Function ---
+# --- CORRECTED Baseline Test Function ---
 
-def run_baseline_test():
-    # Load models (only models, no translators needed)
+def run_corrected_baseline_test():
     model_a, model_b, tokenizer_a, tokenizer_b = load_models_only()
     gc.collect(); torch.cuda.empty_cache()
 
@@ -92,30 +86,32 @@ def run_baseline_test():
     total_f1_score = 0
     total_em_score = 0
     
-    for i, example_idx in enumerate(tqdm(test_indices, desc="Running Baseline Evaluation")):
+    for i, example_idx in enumerate(tqdm(test_indices, desc="Running CORRECTED Baseline Evaluation")):
         example = dataset[example_idx]
-        # Skip examples that don't have exactly two hops for a fair comparison
         if len(example['question_decomposition']) != 2:
             continue
         try:
-            # --- Prepare Context and Decomposed Question ---
+            # Get supporting context for Hop A and Hop B separately
+            paragraph_idx_a = example['question_decomposition'][0]['paragraph_support_idx']
+            paragraph_idx_b = example['question_decomposition'][1]['paragraph_support_idx']
+            
+            # Get 3 distractors (common for both contexts for simplicity)
             distractor_text = [p["paragraph_text"] for p in example["paragraphs"] if p['is_supporting'] == False]
-            # Use 3 distractors as in the original script
             distractor_text = random.sample(distractor_text, min(3, len(distractor_text))) 
             
-            # Context for Model A (Focuses on the first hop's supporting paragraph)
-            paragraph_idx_a = example['question_decomposition'][0]['paragraph_support_idx']
+            # Context for Model A (First Hop)
             context_text_a = [example['paragraphs'][paragraph_idx_a]['paragraph_text']] + distractor_text
             random.shuffle(context_text_a)
             context_text_a = "\n\n".join(context_text_a)
             
             # --- Step 1: Model A Generates Text Answer for the First Hop ---
             
+            # REFINED PROMPT: Instruct Model A to extract the key fact
             first_hop_prompt = (
-                f"Answer the following question based on the context. Be concise:\n\n"
+                f"Extract the key fact required to answer the following question from the context. Be concise and state only the fact.\n\n"
                 f"Context: {context_text_a}\n\n"
                 f"Question: {example['question_decomposition'][0]['question']}\n\n"
-                f"Answer:"
+                f"Fact:"
             )
             
             inputs_a = tokenizer_a(first_hop_prompt, return_tensors="pt", truncation=True, max_length=MAX_CTX_TOKENS).to(DEVICE)
@@ -132,27 +128,23 @@ def run_baseline_test():
             # Decode and clean Model A's answer
             response_start_index_a = inputs_a.input_ids.shape[1]
             first_hop_answer = tokenizer_a.decode(generated_a[0, response_start_index_a:], skip_special_tokens=True).strip()
-            # Simple cleanup: take the first sentence/line
             cleaned_answer_a = first_hop_answer.split('\n')[0].split('.')[0] if '.' in first_hop_answer.split('\n')[0] else first_hop_answer.split('\n')[0]
 
-            del inputs_a, generated_a # Free Model A's memory
+            del inputs_a, generated_a
             gc.collect(); torch.cuda.empty_cache()
 
             # --- Step 2: Model B Generates Final Answer using Model A's Text ---
 
-            # Context for Model B (Focuses on the second hop's supporting paragraph)
-            paragraph_idx_b = example['question_decomposition'][1]['paragraph_support_idx']
+            # Context for Model B (Second Hop)
             context_text_b = [example['paragraphs'][paragraph_idx_b]['paragraph_text']] + distractor_text
             random.shuffle(context_text_b)
             context_text_b = "\n\n".join(context_text_b)
 
-            # Construct the final prompt for Model B
-            # This prompt includes Model A's answer as context/intermediate step
+            # CORRECTED PROMPT: Only include the Intermediate Fact and Context B
             second_hop_prompt = (
-                f"Answer the final question based on the provided context and the intermediate fact.\n\n"
-                f"Context A (First Hop): {context_text_a}\n"
-                f"Intermediate Fact from Step 1: {cleaned_answer_a}\n\n"
-                f"Context B (Second Hop): {context_text_b}\n\n"
+                f"Use the Intermediate Fact and the Context below to answer the Final Question.\n\n"
+                f"Intermediate Fact: {cleaned_answer_a}\n\n"
+                f"Context: {context_text_b}\n\n"
                 f"Final Question: {example['question']}\n\n"
                 f"Final Answer:"
             )
@@ -200,10 +192,10 @@ def run_baseline_test():
 
     average_f1 = total_f1_score / NUM_TESTS
     average_em = total_em_score / NUM_TESTS
-    print(f"\n--- Final Baseline Results ---")
+    print(f"\n--- Final CORRECTED Text-Based Baseline Results ---")
     print(f"Average F1 Score across {NUM_TESTS} samples: {average_f1:.4f}")
     print(f"Average Exact Match Score across {NUM_TESTS} samples: {average_em:.4f}")
 
 
 if __name__ == "__main__":
-    run_baseline_test()
+    run_corrected_baseline_test()
