@@ -63,15 +63,43 @@ def calculate_f1_score(prediction, ground_truth):
     return f1
 
 def generate_fact():
-    """Generate a single fact."""
-    subjects = ["Dr. Evans", "The pilot", "The scientist", "Agent Helix", "The cartographer",
-                "Captain Rivera", "Professor Kim", "Detective Chen", "Colonel Hayes", "Dr. Martinez"]
-    actions = ["placed", "hid", "secured", "delivered", "found", 
-               "stored", "moved", "retrieved", "archived", "discovered"]
-    objects = ["the blue folder", "the silver key", "the encrypted drive", "the heavy package", "the coded map",
-               "the sealed envelope", "the metal case", "the classified document", "the ancient artifact", "the prototype device"]
-    locations = ["in the library", "in the hangar", "in the laboratory", "at the north gate", "behind the console",
-                 "in the archive room", "at the main entrance", "in the storage facility", "near the fountain", "in the vault"]
+    """Generate a single fact with expanded vocabulary to prevent memorization."""
+    subjects = [
+        # People titles
+        "Dr. Evans", "The pilot", "The scientist", "Agent Helix", "The cartographer",
+        "Captain Rivera", "Professor Kim", "Detective Chen", "Colonel Hayes", "Dr. Martinez",
+        "Ambassador Lee", "Inspector Walsh", "Commander Singh", "Dr. Patel", "Agent Morrison",
+        "Professor Anderson", "Captain Brooks", "Detective Quinn", "Colonel Foster", "Dr. Zhang",
+        "The engineer", "The diplomat", "The analyst", "The curator", "The technician",
+        "The researcher", "The specialist", "The coordinator", "The supervisor", "The investigator"
+    ]
+    
+    actions = [
+        "placed", "hid", "secured", "delivered", "found",
+        "stored", "moved", "retrieved", "archived", "discovered",
+        "transferred", "collected", "obtained", "examined", "acquired",
+        "deposited", "concealed", "safeguarded", "transported", "located",
+        "positioned", "stashed", "recovered", "verified", "identified",
+        "assembled", "distributed", "extracted", "preserved", "detected"
+    ]
+    
+    objects = [
+        "the blue folder", "the silver key", "the encrypted drive", "the heavy package", "the coded map",
+        "the sealed envelope", "the metal case", "the classified document", "the ancient artifact", "the prototype device",
+        "the red binder", "the brass medallion", "the backup drive", "the wooden crate", "the detailed blueprint",
+        "the leather journal", "the steel container", "the signed contract", "the rare manuscript", "the experimental chip",
+        "the green folder", "the copper coin", "the memory card", "the plastic box", "the floor plan",
+        "the yellow notebook", "the glass vial", "the research paper", "the stone tablet", "the circuit board"
+    ]
+    
+    locations = [
+        "in the library", "in the hangar", "in the laboratory", "at the north gate", "behind the console",
+        "in the archive room", "at the main entrance", "in the storage facility", "near the fountain", "in the vault",
+        "in the control room", "at the south entrance", "in the research wing", "near the statue", "in the safe",
+        "in the conference room", "at the east checkpoint", "in the basement", "near the elevator", "in the cabinet",
+        "in the office", "at the west gate", "in the workshop", "near the corridor", "in the locker",
+        "in the chamber", "at the dock", "in the warehouse", "near the courtyard", "in the repository"
+    ]
     
     subject = random.choice(subjects)
     action = random.choice(actions)
