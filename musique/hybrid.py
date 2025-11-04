@@ -454,6 +454,7 @@ def evaluate_hybrid_approach(model_a, model_b, tokenizer_a, tokenizer_b,
     total_time = 0
     num_evaluated = 0
     
+    answers = []
     for i in tqdm(range(min(NUM_EVAL_SAMPLES, len(eval_dataset))), desc="Evaluating Hybrid"):
         example = eval_dataset[i]
         full_prompt, context_only, question, ground_truth_answer = format_musique_prompt(example)
@@ -499,6 +500,7 @@ def evaluate_hybrid_approach(model_a, model_b, tokenizer_a, tokenizer_b,
                     cleaned_response = cleaned_response.split(ending)[0].strip()
                     break
             
+            answers.append((cleaned_response, ground_truth_answer))
             f1 = calculate_f1_score(cleaned_response, ground_truth_answer)
             total_f1 += f1
             num_evaluated += 1
@@ -516,6 +518,10 @@ def evaluate_hybrid_approach(model_a, model_b, tokenizer_a, tokenizer_b,
     
     avg_f1 = total_f1 / num_evaluated if num_evaluated > 0 else 0
     avg_time = total_time / num_evaluated if num_evaluated > 0 else 0
+    
+    import json
+    with open("qwen_outputs_15.json", "w") as f:
+        json.dump(answers, f)
     
     return avg_f1, avg_time, num_evaluated
 

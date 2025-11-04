@@ -36,13 +36,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_PATH = f"kv_translators_musique.pth"
 
 # Configuration
-NUM_PROMPTS = 1000
+NUM_PROMPTS = 100
 MAX_CTX_TOKENS = 1024  # Increased for MuSiQue's longer contexts
 TRAIN_STEPS = 5000
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 LR = 1e-3
 SEED = 42
-TRAINING_BATCH_SIZE = 32
+TRAINING_BATCH_SIZE = 4
 COMPILE_MODEL = True
 MIXED_PRECISION = True
 
