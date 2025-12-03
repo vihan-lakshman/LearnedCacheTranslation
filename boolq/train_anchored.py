@@ -15,7 +15,7 @@ logging.set_verbosity_error()
 # Configuration
 ###########################
 if len(sys.argv) < 2:
-    print("Usage: python train_boolq_fixed.py <qwen|mistral>")
+    print("Usage: python train_boolq_anchored.py <qwen|mistral>")
     sys.exit(1)
 
 if sys.argv[1] == 'qwen':
@@ -29,15 +29,16 @@ NUM_LAYERS = 28 if 'Qwen' in MODEL_A else 32
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_PATH = f"kv_translators_boolq_{sys.argv[1]}.pth"
 
-# Stage 1: MSE pretraining (Increased slightly to ensure convergence)
+# Stage 1: MSE pretraining
 STAGE1_STEPS = 3000
 STAGE1_LR = 1e-3
 STAGE1_BATCH_SIZE = 16
 
-# Stage 2: NTP fine-tuning
+# Stage 2: NTP fine-tuning with MSE Anchor
 STAGE2_STEPS = 1000
 STAGE2_LR = 1e-5
 STAGE2_GRADIENT_ACCUMULATION = 4
+LAMBDA_MSE = 1.0  # Strength of the anchor (Prevent cheating)
 
 # General settings
 SEED = 42
@@ -51,7 +52,7 @@ EVAL_EVERY = 500
 NUM_EVAL_SAMPLES = 100
 MAX_NEW_TOKENS = 8
 
-# Data generation for Stage 1
+# Data generation
 NUM_CACHE_PAIRS = 2000
 DATA_BATCH_SIZE = 4
 ###########################
@@ -140,7 +141,7 @@ def get_model_dimensions(tokenizer, model, device, num_layers):
 
 
 def generate_kv_cache_pair(prompt, tokenizer_a, tokenizer_b, model_a, model_b, device, max_length):
-    """Generate KV cache pair from both models."""
+    """Generate KV cache pair from both models (Used for Ground Truth in Stage 2)."""
     inputs_a = tokenizer_a([prompt], return_tensors="pt", padding="max_length", 
                            truncation=True, max_length=max_length).to(device)
     inputs_b = tokenizer_b([prompt], return_tensors="pt", padding="max_length", 
@@ -171,7 +172,7 @@ def generate_kv_cache_pair(prompt, tokenizer_a, tokenizer_b, model_a, model_b, d
 
 
 def generate_source_kv_cache(prompt, tokenizer, model, device, max_length):
-    """Generate KV cache from source model only."""
+    """Generate KV cache from source model only (Used for eval)."""
     inputs = tokenizer([prompt], return_tensors="pt", padding="max_length", 
                        truncation=True, max_length=max_length).to(device)
     with torch.no_grad():
@@ -197,19 +198,16 @@ def translate_cache(source_keys, source_vals, translators_k, translators_v):
     return translated_cache
 
 
-# FIXED: compute_ntp_loss now handles short sequences correctly
 def compute_ntp_loss(model_b, tokenizer_b, translated_cache, response_text, device):
     """Compute next-token prediction loss."""
     
-    # Force a Start token (BOS) or a space to ensure the sequence has length >= 2
-    # This gives the model a previous token to attend to when predicting 'Yes' or 'No'
+    # FIX: Add BOS token to ensure length >= 2
     bos = tokenizer_b.bos_token if tokenizer_b.bos_token else " "
     full_text = f"{bos}{response_text}"
 
     response_ids = tokenizer_b(full_text, return_tensors="pt", padding=False, 
                                truncation=True, max_length=MAX_RESPONSE_TOKENS).input_ids.to(device)
     
-    # Safety check: if somehow it's still too short
     if response_ids.shape[1] < 2:
         return None
     
@@ -259,7 +257,6 @@ def evaluate_translators(model_a, model_b, tokenizer_a, tokenizer_b,
                         source_keys, source_vals, translators_k, translators_v
                     )
             
-            # Use a space as start token to encourage generation
             start_token = tokenizer_b(" ", return_tensors="pt").input_ids.to(device)
             cache_seq_len = translated_cache.get_seq_length()
             attention_mask = torch.ones(1, cache_seq_len + 1, device=device)
@@ -304,11 +301,11 @@ def evaluate_translators(model_a, model_b, tokenizer_a, tokenizer_b,
 
 def main():
     print(f"Device: {DEVICE}")
-    print(f"Two-Stage Training for BoolQ (FIXED VERSION)")
+    print(f"Two-Stage Training for BoolQ (ANCHORED VERSION)")
     print(f"  Model A: {MODEL_A}")
     print(f"  Model B: {MODEL_B}")
     print(f"  Stage 1 (MSE): {STAGE1_STEPS} steps")
-    print(f"  Stage 2 (NTP): {STAGE2_STEPS} steps")
+    print(f"  Stage 2 (NTP + MSE Anchor): {STAGE2_STEPS} steps, Lambda={LAMBDA_MSE}")
     print()
     
     # Load dataset
@@ -393,7 +390,7 @@ def main():
     # MSE training
     params = list(translators_k.parameters()) + list(translators_v.parameters())
     optimizer = optim.AdamW(params, lr=STAGE1_LR)
-    loss_fn = nn.MSELoss()
+    loss_fn_mse = nn.MSELoss()
     scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and DEVICE == 'cuda'))
     
     indices = torch.randperm(num_samples)
@@ -421,7 +418,7 @@ def main():
                 
                 pred_k = translators_k[i](source_k)
                 pred_v = translators_v[i](source_v)
-                total_loss += loss_fn(pred_k, target_k) + loss_fn(pred_v, target_v)
+                total_loss += loss_fn_mse(pred_k, target_k) + loss_fn_mse(pred_v, target_v)
         
         optimizer.zero_grad()
         scaler.scale(total_loss).backward()
@@ -439,27 +436,31 @@ def main():
     torch.cuda.empty_cache()
     
     # =====================
-    # STAGE 2: NTP Fine-tuning
+    # STAGE 2: NTP + MSE Anchor
     # =====================
     print("\n" + "="*80)
-    print("STAGE 2: NTP FINE-TUNING")
+    print("STAGE 2: NTP FINE-TUNING (With MSE Anchor)")
     print("="*80)
     
     optimizer = optim.AdamW(params, lr=STAGE2_LR, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=STAGE2_STEPS, eta_min=STAGE2_LR/10)
     scaler = torch.amp.GradScaler(enabled=(MIXED_PRECISION and DEVICE == 'cuda'))
     
-    running_loss = 0.0
+    running_ntp = 0.0
+    running_mse = 0.0
     successful_steps = 0
     data_idx = 0
     
-    for step in trange(STAGE2_STEPS, desc="Stage 2 (NTP)"):
+    progress_bar = trange(STAGE2_STEPS, desc="Stage 2")
+    
+    for step in progress_bar:
         for i in range(NUM_LAYERS):
             translators_k[i].train()
             translators_v[i].train()
         
         optimizer.zero_grad()
-        batch_loss = 0.0
+        batch_ntp_loss = 0.0
+        batch_mse_loss = 0.0
         batch_success = 0
         
         for accum_step in range(STAGE2_GRADIENT_ACCUMULATION):
@@ -468,48 +469,85 @@ def main():
             
             prompt = build_prompt(ex['passage'], ex['question'])
             answer = "Yes" if ex['answer'] else "No"
-            # Note: We pass raw "Yes"/"No". The compute_ntp_loss function now handles BOS tokens.
             response_text = f" {answer}"
             
             try:
                 with torch.amp.autocast(device_type=DEVICE, dtype=torch.float16, enabled=MIXED_PRECISION):
-                    source_keys, source_vals = generate_source_kv_cache(
-                        prompt, tokenizer_a, model_a, DEVICE, MAX_CTX_TOKENS
+                    # 1. Generate BOTH source and target caches (Ground Truth for Anchor)
+                    # We need target keys/vals to act as the "Anchor"
+                    sk, sv, tk, tv = generate_kv_cache_pair(
+                        prompt, tokenizer_a, tokenizer_b, model_a, model_b, DEVICE, MAX_CTX_TOKENS
                     )
-                    translated_cache = translate_cache(
-                        source_keys, source_vals, translators_k, translators_v
-                    )
-                    loss = compute_ntp_loss(model_b, tokenizer_b, translated_cache, response_text, DEVICE)
                     
-                    if loss is not None:
-                        loss = loss / STAGE2_GRADIENT_ACCUMULATION
-                        scaler.scale(loss).backward()
-                        batch_loss += loss.item()
+                    # 2. Run Translator & Calculate MSE Anchor
+                    # We compute MSE directly on tensors before packing into DynamicCache
+                    mse_step_loss = 0.0
+                    translated_cache = DynamicCache()
+                    
+                    for i in range(NUM_LAYERS):
+                        s_k_gpu = sk[i].to(DEVICE)
+                        s_v_gpu = sv[i].to(DEVICE)
+                        t_k_gpu = tk[i].to(DEVICE)
+                        t_v_gpu = tv[i].to(DEVICE)
+                        
+                        pred_k = translators_k[i](s_k_gpu)
+                        pred_v = translators_v[i](s_v_gpu)
+                        
+                        mse_step_loss += loss_fn_mse(pred_k, t_k_gpu) + loss_fn_mse(pred_v, t_v_gpu)
+                        translated_cache.update(pred_k, pred_v, i)
+                    
+                    mse_step_loss = mse_step_loss / (2 * NUM_LAYERS)
+                    
+                    # 3. Calculate NTP Loss
+                    ntp_step_loss = compute_ntp_loss(model_b, tokenizer_b, translated_cache, response_text, DEVICE)
+                    
+                    if ntp_step_loss is not None:
+                        # 4. Combined Loss
+                        total_loss = ntp_step_loss + (LAMBDA_MSE * mse_step_loss)
+                        
+                        total_loss = total_loss / STAGE2_GRADIENT_ACCUMULATION
+                        scaler.scale(total_loss).backward()
+                        
+                        batch_ntp_loss += ntp_step_loss.item()
+                        batch_mse_loss += mse_step_loss.item()
                         batch_success += 1
+                        
             except Exception as e:
                 print(f"\nStep {step}, accum {accum_step} failed: {e}")
                 continue
         
-        # FIXED: Removed the else block that caused the crash
         if batch_success > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(params, MAX_GRAD_NORM)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
-            running_loss += batch_loss * (STAGE2_GRADIENT_ACCUMULATION / batch_success)
+            
+            # Normalize statistics
+            curr_ntp = batch_ntp_loss / batch_success
+            curr_mse = batch_mse_loss / batch_success
+            
+            running_ntp += curr_ntp
+            running_mse += curr_mse
             successful_steps += 1
+            
+            # Update progress bar description
+            progress_bar.set_description(f"Stage 2 (NTP={curr_ntp:.4f}, MSE={curr_mse:.4f})")
+        else:
+            scaler.update() # Skip step if all failed
         
         if (step + 1) % 100 == 0 and successful_steps > 0:
-            avg_loss = running_loss / min(100, successful_steps)
-            print(f"\n[Stage 2, Step {step+1}] NTP Loss: {avg_loss:.4f}")
-            running_loss = 0.0
+            avg_ntp = running_ntp / min(100, successful_steps)
+            avg_mse = running_mse / min(100, successful_steps)
+            print(f"\n[Stage 2, Step {step+1}] NTP: {avg_ntp:.4f} | MSE (Anchor): {avg_mse:.4f}")
+            running_ntp = 0.0
+            running_mse = 0.0
             successful_steps = 0
         
         if (step + 1) % EVAL_EVERY == 0:
             accuracy = evaluate_translators(model_a, model_b, tokenizer_a, tokenizer_b, 
                                             translators_k, translators_v, eval_data, DEVICE)
-            eval_history.append(('stage2', step + 1, batch_loss * STAGE2_GRADIENT_ACCUMULATION, accuracy))
+            eval_history.append(('stage2', step + 1, batch_ntp_loss, accuracy))
     
     # Final evaluation
     print("\n" + "="*80)
@@ -540,6 +578,7 @@ def main():
             'task': 'boolq',
             'stage1_steps': STAGE1_STEPS,
             'stage2_steps': STAGE2_STEPS,
+            'lambda_mse': LAMBDA_MSE
         }
     }, SAVE_PATH)
     
