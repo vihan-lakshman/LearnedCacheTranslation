@@ -11,15 +11,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_SAMPLES = 200 # Set to None for full test
 
 def extract_answer_number(text):
-    """Finds the last number in the text (standard GSM8K eval)."""
-    # Look for '####' which marks the answer in GSM8K gold lines
+    """Robust extraction of the final number from reasoning text."""
+    # If the model follows GSM8K format '#### 42'
     if "####" in text:
         text = text.split("####")[1]
-    
-    # Extract all numbers (integers or floats)
+
+    # Otherwise find the last number
     matches = re.findall(r'-?\d+\.?\d*', text.replace(',', ''))
     if matches:
-        return matches[-1]
+        answer = matches[-1]
+        answer = answer.rstrip('.')
+        return answer
     return None
 
 def eval_model(model_name, dataset):

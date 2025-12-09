@@ -63,11 +63,13 @@ def extract_answer_number(text):
     # If the model follows GSM8K format '#### 42'
     if "####" in text:
         text = text.split("####")[1]
-    
+
     # Otherwise find the last number
     matches = re.findall(r'-?\d+\.?\d*', text.replace(',', ''))
     if matches:
-        return matches[-1]
+        answer = matches[-1]
+        answer = answer.rstrip('.')
+        return answer
     return None
 
 def build_prompt(question):
